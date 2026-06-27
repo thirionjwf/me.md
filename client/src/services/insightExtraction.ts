@@ -12,7 +12,7 @@
  *   with a rule-based fallback if the AI is unavailable.
  */
 
-import { callAnthropic, isApiKeyConfigured } from './anthropic'
+import { callMiniMax, isApiKeyConfigured } from './minimax'
 
 // ============================================
 // Types
@@ -244,7 +244,7 @@ async function callClaudeForInsights(
 
   try {
     console.log('[me.md:insight-extraction] Calling Claude API for unified insight extraction')
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       messages: [{ role: 'user', content: userPrompt }],
       system: systemPrompt,
       maxTokens: 4096,

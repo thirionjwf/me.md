@@ -15,10 +15,9 @@ export default defineConfig({
     port: 5173,
     host: '0.0.0.0',
     proxy: {
-      '/anthropic': {
-        target: 'https://api.anthropic.com',
+      '/v1': {
+        target: 'https://api.minimax.io',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/anthropic/, ''),
       },
     },
   },

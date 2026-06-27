@@ -3,7 +3,7 @@ import { useUser } from '@/contexts/UserContext'
 import { useDatabase } from '@/contexts/DatabaseContext'
 import { useTheme } from '@/contexts/ThemeContext'
 import { downloadDatabase, downloadForMCP, importDatabaseFile } from '@/db/persistence'
-import { callAnthropic } from '@/services/anthropic'
+import { callMiniMax } from '@/services/minimax'
 import { formatFullDate } from '@/utils/dateFormat'
 import { getAllInsights, editInsight } from '@/services/insights'
 import { useUnsavedChangesWarning } from '@/hooks/useUnsavedChangesWarning'
@@ -352,7 +352,7 @@ export default function SettingsPage() {
     setTestingKey(true)
     setApiKeyStatus(null)
     try {
-      const result = await callAnthropic({
+      const result = await callMiniMax({
         messages: [{ role: 'user', content: 'Say "API key works!" in 3 words or less.' }],
         maxTokens: 20,
       })
@@ -585,17 +585,19 @@ export default function SettingsPage() {
       {activeTab === 'apikey' && (
         <div className="space-y-6">
           <div className="card">
-            <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Anthropic API Key</h2>
+            <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">MiniMax API Key</h2>
             <p className="text-sm text-gray-600 dark:text-gray-300 mb-4">
-              Your API key is stored in localStorage and never sent to any server except Anthropic&apos;s API
-              (via the Vite dev proxy). Get your key from{' '}
+              Your API key is stored in localStorage and never sent to any server except MiniMax&apos;s API
+              (via the Vite dev proxy). The Token Plan uses an OpenAI-compatible endpoint at
+              <code className="mx-1 bg-gray-100 dark:bg-gray-800 px-1 rounded">api.minimax.io/v1</code>.
+              Get your key from{' '}
               <a
-                href="https://console.anthropic.com/settings/keys"
+                href="https://platform.minimaxi.com"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-primary-600 dark:text-primary-400 underline hover:text-primary-700 dark:hover:text-primary-300"
               >
-                console.anthropic.com
+                platform.minimaxi.com
               </a>.
             </p>
 
@@ -620,7 +622,7 @@ export default function SettingsPage() {
                   type="password"
                   value={apiKeyInput}
                   onChange={(e) => setApiKeyInput(e.target.value)}
-                  placeholder="sk-ant-..."
+                  placeholder="sk-..."
                   className="input-field w-full"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleSaveApiKey()
@@ -655,7 +657,7 @@ export default function SettingsPage() {
           <div className="p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
             <p className="text-sm text-amber-800 dark:text-amber-200">
               <strong>Security note:</strong> Your API key is stored only in your browser&apos;s localStorage. It is
-              never saved to the database or transmitted anywhere except to Anthropic when making AI calls.
+              never saved to the database or transmitted anywhere except to MiniMax when making AI calls.
               Clearing browser data will remove it.
             </p>
           </div>

@@ -1,4 +1,4 @@
-import { callAnthropic, isApiKeyConfigured } from './anthropic'
+import { callMiniMax, isApiKeyConfigured } from './minimax'
 import { insights, notes, topics } from '../db/schema'
 import { eq, and } from 'drizzle-orm'
 import type { SQLJsDatabase as SqlJsDatabase } from 'drizzle-orm/sql-js'
@@ -200,7 +200,7 @@ ${hasExistingInsights ? `3. **Cross-reference with existing insights**: Compare 
 
     console.log(`[me.md:personality-insights] Calling Claude API for personality insight generation (${domainScores.length} domains, ${existingInsights.length} existing insights)`)
 
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
       maxTokens: 4096,
@@ -448,7 +448,7 @@ Output JSON:
 Keep insights concise (1-2 sentences each). Generate 2-5 insights.`
 
     console.log(`[me.md:personality-insights] Generating change insights via AI`)
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
       maxTokens: 2048,

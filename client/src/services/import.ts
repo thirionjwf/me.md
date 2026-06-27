@@ -28,6 +28,35 @@ type Db = SQLJsDatabase<typeof schema>
 // HTML/text helpers
 // ============================================
 
+async function fetchHtml(url: string): Promise<string> {
+  // Try direct fetch first (works for sites that allow CORS or same-origin).
+  let directError = ''
+  try {
+    const direct = await fetch(url, { signal: AbortSignal.timeout(10000) })
+    if (direct.ok) return await direct.text()
+    // Real HTTP error — proxy won't help, surface it directly.
+    throw new Error(`HTTP ${direct.status}`)
+  } catch (err) {
+    directError = (err as Error).message
+    // Network failure / CORS block — fall through to proxy attempt.
+  }
+
+  console.warn(`[me.md:import] Direct fetch failed for ${url}: ${directError}. Trying CORS proxy.`)
+
+  try {
+    const proxied = await fetch(`https://corsproxy.io/?url=${encodeURIComponent(url)}`, {
+      signal: AbortSignal.timeout(15000),
+    })
+    if (!proxied.ok) throw new Error(`HTTP ${proxied.status}`)
+    return await proxied.text()
+  } catch (proxyErr) {
+    throw new Error(
+      `Could not fetch URL — the site likely blocks browser requests (common for LinkedIn, Twitter, Instagram, etc.). ` +
+      `Try pasting the content manually via the "Import Text" tab. (Direct: ${directError}; Proxy: ${(proxyErr as Error).message})`,
+    )
+  }
+}
+
 function extractTextFromHtml(html: string): string {
   let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
   text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
@@ -108,10 +137,7 @@ export async function importUrls(db: Db, urls: string[]) {
 
   for (const url of validUrls) {
     try {
-      // Use fetch API (browser) with a CORS proxy may be needed for some URLs
-      const response = await fetch(url, { signal: AbortSignal.timeout(10000) })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const html = await response.text()
+      const html = await fetchHtml(url)
 
       const title = extractTitle(html)
       const text = extractTextFromHtml(html)

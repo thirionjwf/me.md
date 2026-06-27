@@ -1,4 +1,4 @@
-import { callAnthropic, streamAnthropic, isApiKeyConfigured } from './anthropic'
+import { callMiniMax, streamMiniMax, isApiKeyConfigured } from './minimax'
 
 // ============================================
 // AI Service Layer - Claude API Integration
@@ -406,7 +406,7 @@ export async function generateClaudeResponse(options: AIResponseOptions): Promis
   try {
     console.log(`[me.md:ai] Calling Claude API for ${options.isMiniSession ? 'mini' : 'standard'} session (${userMessageCount} user messages)`)
 
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       messages: apiMessages,
       system: systemPrompt,
       maxTokens: 1024,
@@ -459,7 +459,7 @@ export async function* streamClaudeResponse(options: AIResponseOptions): AsyncGe
 
     let fullText = ''
 
-    for await (const chunk of streamAnthropic({
+    for await (const chunk of streamMiniMax({
       messages: apiMessages,
       system: systemPrompt,
       maxTokens: 1024,
@@ -530,7 +530,7 @@ Generate 3-4 contextual first-person quick reply options for the user:`
 
   try {
     console.log('[me.md:ai] Calling Claude API for quick reply suggestions')
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       messages: [{ role: 'user', content: userPrompt }],
       system: systemPrompt,
       maxTokens: 256,
@@ -589,7 +589,7 @@ async function callClaudeForDistillation(systemPrompt: string, userPrompt: strin
 
   try {
     console.log('[me.md:ai] Calling Claude API for note distillation')
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       messages: [{ role: 'user', content: userPrompt }],
       system: systemPrompt,
       maxTokens,
@@ -1019,7 +1019,7 @@ Use one of these intents: articulate, explore, decide, document
   try {
     console.log(`[me.md:ai] Calling Claude API for personalized topic suggestions (${ctx.existingTopics.length} topics, ${ctx.verifiedInsights.length} insights)`)
 
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       messages: [{ role: 'user', content: userPrompt }],
       system: systemPrompt,
       maxTokens: 2048,

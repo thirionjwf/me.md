@@ -19,7 +19,7 @@
       <runtime>Node.js with Express</runtime>
       <database>SQLite with better-sqlite3</database>
       <orm>Drizzle ORM</orm>
-      <ai_provider>Anthropic Claude Sonnet 4.5 via API</ai_provider>
+      <ai_provider>MiniMax M3 via OpenAI-compatible API (Token Plan)</ai_provider>
       <authentication>Firebase Auth (Google Sign-In + email/password)</authentication>
       <file_upload>Multer for file handling</file_upload>
       <mcp>@modelcontextprotocol/sdk for MCP server</mcp>
@@ -34,7 +34,7 @@
     <environment_setup>
       - Node.js 20+ and npm
       - Firebase project with Auth configured (Google provider + email/password)
-      - Anthropic API key for Claude Sonnet 4.5
+      - MiniMax Token Plan API key (OpenAI-compatible endpoint at api.minimax.io/v1)
       - SQLite3 available on system
     </environment_setup>
   </prerequisites>

@@ -19,7 +19,7 @@ import {
 } from '@/db/schema'
 import { scheduleSave } from '@/db/persistence'
 import { LOCAL_USER_ID } from '@/contexts/UserContext'
-import { callAnthropic, isApiKeyConfigured } from './anthropic'
+import { callMiniMax, isApiKeyConfigured } from './minimax'
 
 // ============================================
 // Big Five library imports (CJS packages)
@@ -222,7 +222,7 @@ async function generatePersonalityInsights(
 
     const userPrompt = `Analyze Big Five results and generate 5-10 insights.\n\n## Scores\n${scoresText}\n\n## Descriptions\n${descriptionsText}${existingInsightsContext}\n\nOutput JSON: { "insights": [{ "category": "...", "claim": "...", "confidence": 75, "evidence": "..." }], "agreements": [], "contradictions": [] }`
 
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       messages: [{ role: 'user', content: userPrompt }],
       system: systemPrompt,
       maxTokens: 4096,
@@ -1010,7 +1010,7 @@ async function _generateChangeInsightsAI(
       }
     }
 
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       messages: [{ role: 'user', content: `Analyze Big Five changes:\n\n${domainChanges.join('\n')}\n\nOutput JSON: { "insights": [...], "significantShifts": [{ "domain": "O", "label": "Openness", "from": 3.5, "to": 4.0, "interpretation": "..." }] }` }],
       system: 'You are a personality psychologist analyzing Big Five score changes. Output ONLY valid JSON.',
       maxTokens: 2048,

@@ -11,7 +11,7 @@ import type { SQLJsDatabase } from 'drizzle-orm/sql-js'
 import type * as schema from '@/db/schema'
 import { insights, users, topics } from '@/db/schema'
 import { LOCAL_USER_ID } from '@/contexts/UserContext'
-import { callAnthropic, streamAnthropic, isApiKeyConfigured } from './anthropic'
+import { callMiniMax, streamMiniMax, isApiKeyConfigured } from './minimax'
 
 type Db = SQLJsDatabase<typeof schema>
 
@@ -243,9 +243,9 @@ export async function compareSandbox(db: Db, prompt: string) {
   if (isApiKeyConfigured()) {
     try {
       const [genericResult, personalizedResult] = await Promise.all([
-        callAnthropic({ messages: [{ role: 'user', content: trimmedPrompt }], system: buildGenericSystemPrompt() }),
+        callMiniMax({ messages: [{ role: 'user', content: trimmedPrompt }], system: buildGenericSystemPrompt() }),
         hasContext && context
-          ? callAnthropic({ messages: [{ role: 'user', content: trimmedPrompt }], system: buildPersonalizedSystemPrompt(context) })
+          ? callMiniMax({ messages: [{ role: 'user', content: trimmedPrompt }], system: buildPersonalizedSystemPrompt(context) })
           : Promise.resolve(null),
       ])
 
@@ -318,7 +318,7 @@ export function compareSandboxStream(db: Db, prompt: string): {
     if (!isApiKeyConfigured()) {
       return singleChunkGenerator(generateGenericResponseFallback(trimmedPrompt))
     }
-    return streamAnthropic({
+    return streamMiniMax({
       messages: [{ role: 'user', content: trimmedPrompt }],
       system: buildGenericSystemPrompt(),
     })
@@ -332,7 +332,7 @@ export function compareSandboxStream(db: Db, prompt: string): {
     if (!isApiKeyConfigured()) {
       return singleChunkGenerator(generatePersonalizedResponseFallback(trimmedPrompt, context))
     }
-    return streamAnthropic({
+    return streamMiniMax({
       messages: [{ role: 'user', content: trimmedPrompt }],
       system: buildPersonalizedSystemPrompt(context),
     })

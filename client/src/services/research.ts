@@ -1,4 +1,4 @@
-import { callAnthropic, isApiKeyConfigured } from './anthropic'
+import { callMiniMax, isApiKeyConfigured } from './minimax'
 
 // ============================================
 // Research Service - Web Research for Topics
@@ -92,7 +92,7 @@ Make the research specific and substantive. Include concrete details, statistics
   try {
     console.log(`[me.md:research] Researching topic: "${topicTitle}"`)
 
-    const responseText = await callAnthropic({
+    const responseText = await callMiniMax({
       system: systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
       maxTokens: 2048,
