@@ -6,6 +6,7 @@ import ApiErrorAlert from '@/components/ApiErrorAlert';
 import ConflictsSection from '../components/verification/ConflictsSection';
 import SwipeableCard from '../components/verification/SwipeableCard';
 import { getInsightStats, getPendingInsights, getAllInsights, verifyInsight, rejectInsight, editInsight, getInsight } from '@/services/insights';
+import { reExtractAllSessions, getNotes, clearAndRedistillAll } from '@/services/notes';
 import { formatDateTime as sharedFormatDateTime, formatShortDate } from '@/utils/dateFormat';
 
 interface Insight {
@@ -98,6 +99,25 @@ export default function VerificationPage() {
   const [batchReviewed, setBatchReviewed] = useState(0);
   const [batchInsights, setBatchInsights] = useState<Insight[]>([]);
 
+  // Re-extraction state
+  const [reExtracting, setReExtracting] = useState(false)
+  const [reExtractProgress, setReExtractProgress] = useState<{
+    phase: 'idle' | 'starting' | 'in_progress' | 'completing'
+    index: number
+    total: number
+    currentTitle: string
+  }>({ phase: 'idle', index: 0, total: 0, currentTitle: '' })
+  const [distilledSessionCount, setDistilledSessionCount] = useState(0)
+
+  // Clear & re-distill state (destructive reset)
+  const [clearAndReExtracting, setClearAndReExtracting] = useState(false)
+  const [clearProgress, setClearProgress] = useState<{
+    phase: 'clear' | 'distill' | 'done'
+    index: number
+    total: number
+    title: string
+  } | null>(null)
+
   const fetchData = useCallback(async (signal?: AbortSignal) => {
     if (!user) return;
     try {
@@ -111,6 +131,15 @@ export default function VerificationPage() {
 
       const verifiedData = getAllInsights(db, 'verified');
       setVerifiedInsights(verifiedData.insights || []);
+
+      // Count distilled sessions so the "Re-extract from sessions" button can
+      // appear whenever there's something to re-mine, not just when there are
+      // pending insights remaining.
+      const { notes: allNotes } = getNotes(db);
+      const uniqueSessions = new Set<string>(
+        allNotes.map((n: any) => n.sessionId as string).filter(Boolean),
+      );
+      setDistilledSessionCount(uniqueSessions.size);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       console.error('Failed to fetch verification data:', err);
@@ -316,6 +345,102 @@ export default function VerificationPage() {
   // ============================================
   // Batch Review Mode Handlers
   // ============================================
+
+  const handleReExtractAll = async () => {
+    if (!user || reExtracting) return
+    const confirmMsg =
+      'Re-run AI extraction on every distilled session. ' +
+      'Your verified insights will be preserved, but every unverified insight will be replaced with a fresh extraction. ' +
+      'This uses your AI API quota. Continue?'
+    if (!window.confirm(confirmMsg)) return
+
+    setReExtracting(true)
+    setReExtractProgress({
+      phase: 'starting',
+      index: 0,
+      total: 0,
+      currentTitle: 'Preparing sessions…',
+    })
+    try {
+      const result = await reExtractAllSessions(db, (phase, index, total, title) => {
+        setReExtractProgress({
+          phase: phase === 'start' ? 'in_progress' : 'completing',
+          index,
+          total,
+          currentTitle: title,
+        })
+      })
+      const errorSuffix = result.errors.length > 0
+        ? ` (${result.errors.length} session${result.errors.length === 1 ? '' : 's'} failed)`
+        : ''
+      addToast(
+        `Re-extracted ${result.totalInserted} insight${result.totalInserted === 1 ? '' : 's'} across ${result.sessionsProcessed} session${result.sessionsProcessed === 1 ? '' : 's'}${errorSuffix}.`,
+        result.errors.length > 0 ? 'warning' : 'success',
+      )
+      await fetchData()
+    } catch (err) {
+      console.error('Re-extract failed:', err)
+      const message = err instanceof Error ? err.message : 'Re-extraction failed'
+      setError(message)
+      addToast(message, 'error')
+    } finally {
+      setReExtracting(false)
+      setReExtractProgress({ phase: 'idle', index: 0, total: 0, currentTitle: '' })
+    }
+  }
+
+  const handleClearAndReDistill = async () => {
+    if (!user || clearAndReExtracting || reExtracting) return
+
+    const stats = await getInsightStats(db)
+    const verifiedCount = stats.verified ?? 0
+    const rejectedCount = stats.rejected ?? 0
+    const pendingCount = stats.pending ?? 0
+
+    const confirmMsg =
+      `This will PERMANENTLY DELETE:\n` +
+      `  • ${verifiedCount} verified insight${verifiedCount === 1 ? '' : 's'}\n` +
+      `  • ${rejectedCount} rejected insight${rejectedCount === 1 ? '' : 's'}\n` +
+      `  • ${pendingCount} unverified insight${pendingCount === 1 ? '' : 's'}\n` +
+      `  • all distilled session notes (full analysis, brief summary, decision framework)\n\n` +
+      `Notes will be regenerated from raw transcripts and insights re-extracted in first-person framing.\n` +
+      `You will need to re-verify all insights.\n\n` +
+      `This cannot be undone. Continue?`
+
+    if (!window.confirm(confirmMsg)) return
+
+    setClearAndReExtracting(true)
+    setClearProgress({ phase: 'clear', index: 0, total: 0, title: 'Clearing insights and notes' })
+    try {
+      const result = await clearAndRedistillAll(db, (phase, index, total, title) => {
+        setClearProgress({ phase, index, total, title })
+      })
+      setClearProgress({
+        phase: 'done',
+        index: result.notesRegenerated,
+        total: result.notesRegenerated,
+        title: 'Complete',
+      })
+      const errorSuffix = result.errors.length > 0
+        ? ` (${result.errors.length} session${result.errors.length === 1 ? '' : 's'} failed)`
+        : ''
+      addToast(
+        `Cleared ${result.insightsDeleted} insight${result.insightsDeleted === 1 ? '' : 's'}, ` +
+        `regenerated ${result.notesRegenerated} note${result.notesRegenerated === 1 ? '' : 's'}, ` +
+        `extracted ${result.totalInserted} new insight${result.totalInserted === 1 ? '' : 's'}${errorSuffix}.`,
+        result.errors.length > 0 ? 'warning' : 'success',
+      )
+      await fetchData()
+    } catch (err) {
+      console.error('Clear & re-distill failed:', err)
+      const message = err instanceof Error ? err.message : 'Clear & re-extract failed'
+      setError(message)
+      addToast(message, 'error')
+    } finally {
+      setClearAndReExtracting(false)
+      setClearProgress(null)
+    }
+  }
 
   const startBatchReview = () => {
     if (pendingInsights.length === 0) return;
@@ -986,34 +1111,231 @@ export default function VerificationPage() {
 
       {/* Pending insights list (Verification Queue view) - hidden in batch mode */}
       {activeView === 'verification' && !batchMode && (
-        pendingInsights.length === 0 ? (
-        <div className="card text-center py-12">
-          <span className="text-4xl block mb-3">&#x2705;</span>
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
-            No insights to verify
-          </h2>
-          <p className="text-gray-600 dark:text-gray-300">
-            Complete interview sessions to generate insights for verification.
-          </p>
-        </div>
-      ) : (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-gray-500 dark:text-gray-300">
-              {pendingInsights.length} insight{pendingInsights.length !== 1 ? 's' : ''} awaiting review
-            </p>
-            {pendingInsights.length >= 2 && (
+          {/* Toolbar with re-extract / clear buttons — visible whenever there
+              are distilled sessions, even if no insights are currently pending. */}
+          {distilledSessionCount > 0 && (
+            <div className="flex items-center justify-end gap-2">
               <button
-                onClick={startBatchReview}
-                className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm"
+                onClick={handleReExtractAll}
+                disabled={reExtracting || clearAndReExtracting}
+                title="Re-runs AI extraction on every distilled session. Verified insights are preserved; unverified insights are replaced with a fresh batch."
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-amber-50 dark:bg-amber-900/30 hover:bg-amber-100 dark:hover:bg-amber-900/50 disabled:opacity-60 disabled:cursor-wait text-amber-800 dark:text-amber-200 text-sm font-medium rounded-lg transition-colors border border-amber-300 dark:border-amber-700"
               >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
-                Start Batch Review ({pendingInsights.length})
+                {reExtracting ? (
+                  <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                )}
+                {reExtracting
+                  ? 'Re-extracting…'
+                  : `Re-extract from sessions (${distilledSessionCount})`}
               </button>
-            )}
-          </div>
+              <button
+                onClick={handleClearAndReDistill}
+                disabled={clearAndReExtracting || reExtracting}
+                title="DESTRUCTIVE: Deletes all insights (verified, rejected, unverified) and all distilled notes, then re-distills every session and re-extracts insights in first-person framing. You will re-verify from scratch."
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-red-50 dark:bg-red-900/30 hover:bg-red-100 dark:hover:bg-red-900/50 disabled:opacity-60 disabled:cursor-wait text-red-800 dark:text-red-200 text-sm font-medium rounded-lg transition-colors border border-red-300 dark:border-red-700"
+              >
+                {clearAndReExtracting ? (
+                  <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M1 7h22M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3" />
+                  </svg>
+                )}
+                {clearAndReExtracting
+                  ? 'Clearing & redistilling…'
+                  : `Clear & re-extract all (${distilledSessionCount})`}
+              </button>
+            </div>
+          )}
+          {pendingInsights.length === 0 ? (
+            <div className="card text-center py-12">
+              <span className="text-4xl block mb-3">&#x2705;</span>
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
+                No insights to verify
+              </h2>
+              <p className="text-gray-600 dark:text-gray-300">
+                Complete interview sessions to generate insights for verification.
+              </p>
+            </div>
+          ) : (
+            <div>
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-gray-500 dark:text-gray-300">
+                  {pendingInsights.length} insight{pendingInsights.length !== 1 ? 's' : ''} awaiting review
+                </p>
+                {pendingInsights.length >= 2 && (
+                  <button
+                    onClick={startBatchReview}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors shadow-sm"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Start Batch Review ({pendingInsights.length})
+                  </button>
+                )}
+              </div>
+          {/* Re-extraction progress banner — visible while the batch is running */}
+          {reExtracting && (() => {
+            const { phase, index, total, currentTitle } = reExtractProgress
+            const pct = total > 0 ? Math.round((index / total) * 100) : 0
+            const stepLabel =
+              phase === 'starting'
+                ? 'Preparing sessions…'
+                : phase === 'in_progress'
+                  ? `Reading session ${index + 1} of ${total}: ${currentTitle}`
+                  : phase === 'completing'
+                    ? `Finished ${currentTitle} — saving new insights…`
+                    : 'Working…'
+            return (
+              <div
+                role="status"
+                aria-live="polite"
+                className="card bg-amber-50 dark:bg-amber-900/20 border-amber-300 dark:border-amber-700"
+              >
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <svg
+                      className="animate-spin w-5 h-5 text-amber-600 dark:text-amber-300 shrink-0"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      />
+                    </svg>
+                    <h3 className="text-sm font-semibold text-amber-900 dark:text-amber-100 truncate">
+                      Re-extracting insights from your sessions
+                    </h3>
+                  </div>
+                  {total > 0 && (
+                    <span className="text-sm font-mono font-semibold text-amber-800 dark:text-amber-200 shrink-0">
+                      {index} / {total} ({pct}%)
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm text-amber-800 dark:text-amber-200 mb-2 truncate">
+                  {stepLabel}
+                </p>
+                {total > 0 && (
+                  <div
+                    className="w-full h-2 bg-amber-200 dark:bg-amber-800/60 rounded-full overflow-hidden"
+                    role="progressbar"
+                    aria-valuenow={pct}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-label={`Re-extraction progress: ${index} of ${total} sessions`}
+                  >
+                    <div
+                      className="h-full bg-amber-500 dark:bg-amber-400 rounded-full transition-all duration-300"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                )}
+                <p className="text-xs text-amber-700 dark:text-amber-300 mt-2">
+                  Each session sends up to three AI calls (Full Analysis, Brief Summary, Decision
+                  Framework) in parallel — this can take 5–15 seconds per session depending on the
+                  AI provider.
+                </p>
+              </div>
+            )
+          })()}
+          {/* Clear & re-distill progress banner — visible while the destructive reset is running */}
+          {clearAndReExtracting && clearProgress && (() => {
+            const { phase, index, total, title } = clearProgress
+            const pct = phase === 'clear' ? 0 : total > 0 ? Math.round((index / total) * 100) : 0
+            const stepLabel =
+              phase === 'clear'
+                ? 'Clearing all insights, notes, and concept graph…'
+                : phase === 'done'
+                  ? `Done — ${total} session${total === 1 ? '' : 's'} regenerated`
+                  : `Distilling session ${Math.min(index + 1, total)} of ${total}: ${title}`
+            return (
+              <div
+                role="status"
+                aria-live="polite"
+                className="card bg-red-50 dark:bg-red-900/20 border-red-300 dark:border-red-700"
+              >
+                <div className="flex items-center justify-between gap-3 mb-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <svg
+                      className="animate-spin w-5 h-5 text-red-600 dark:text-red-300 shrink-0"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                      />
+                    </svg>
+                    <h3 className="text-sm font-semibold text-red-900 dark:text-red-100 truncate">
+                      Clear &amp; re-extract — destructive reset in progress
+                    </h3>
+                  </div>
+                  {phase === 'distill' && total > 0 && (
+                    <span className="text-sm font-mono font-semibold text-red-800 dark:text-red-200 shrink-0">
+                      {index} / {total} ({pct}%)
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm text-red-800 dark:text-red-200 mb-2 truncate">
+                  {stepLabel}
+                </p>
+                {phase === 'distill' && total > 0 && (
+                  <div
+                    className="w-full h-2 bg-red-200 dark:bg-red-800/60 rounded-full overflow-hidden"
+                    role="progressbar"
+                    aria-valuenow={pct}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-label={`Clear progress: ${index} of ${total} sessions`}
+                  >
+                    <div
+                      className="h-full bg-red-500 dark:bg-red-400 rounded-full transition-all duration-300"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                )}
+                <p className="text-xs text-red-700 dark:text-red-300 mt-2">
+                  Each session sends up to three AI calls (Full Analysis, Brief Summary, Decision
+                  Framework) plus insight extraction. With 16 sessions this typically takes 2–5
+                  minutes total.
+                </p>
+              </div>
+            )
+          })()}
           {/* Keyboard navigation hint */}
           <p className="text-xs text-gray-400 dark:text-gray-500 hidden lg:block" aria-hidden="true">
             <kbd className="px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 font-mono text-[10px]">Tab</kbd> to navigate cards,{' '}
@@ -1435,8 +1757,10 @@ export default function VerificationPage() {
             </SwipeableCard>
           );
           })}
+            </div>
+          )}
         </div>
-      ))}
+      )}
 
       {/* Insight Conflicts Section - only in verification view */}
       {activeView === 'verification' && (

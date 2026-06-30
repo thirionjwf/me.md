@@ -560,3 +560,51 @@ export function deleteInsight(db: Db, id: string) {
 
   return { message: 'Insight deleted successfully', id }
 }
+
+/**
+ * Delete ALL insights for the local user, including verified and rejected.
+ * Cleans up verification history, concept nodes, and concept edges.
+ * Use this for a destructive full reset (e.g., before re-extracting everything).
+ */
+export function clearAllInsights(db: Db): { deleted: number } {
+  const userId = LOCAL_USER_ID
+
+  const allInsightIds = db.select({ id: insights.id })
+    .from(insights)
+    .where(eq(insights.userId, userId))
+    .all()
+    .map((row: { id: string }) => row.id)
+
+  if (allInsightIds.length === 0) {
+    return { deleted: 0 }
+  }
+
+  for (const id of allInsightIds) {
+    db.delete(verificationHistory)
+      .where(eq(verificationHistory.insightId, id))
+      .run()
+
+    const linkedConceptNodes = db.select({ id: conceptNodes.id })
+      .from(conceptNodes)
+      .where(eq(conceptNodes.insightId, id))
+      .all()
+
+    if (linkedConceptNodes.length > 0) {
+      for (const node of linkedConceptNodes) {
+        db.delete(conceptEdges).where(
+          or(
+            eq(conceptEdges.sourceNodeId, node.id),
+            eq(conceptEdges.targetNodeId, node.id),
+          ),
+        ).run()
+      }
+      db.delete(conceptNodes).where(eq(conceptNodes.insightId, id)).run()
+    }
+
+    db.delete(insights).where(eq(insights.id, id)).run()
+  }
+
+  scheduleSave()
+
+  return { deleted: allInsightIds.length }
+}

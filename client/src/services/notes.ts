@@ -9,7 +9,9 @@ import {
   generateJsonContentAI,
   type DistillationContext,
 } from './ai'
-import { extractInsights, formatInterviewTranscript, type ExtractionContext } from './insightExtraction'
+import { extractInsights, formatInterviewTranscript, type ExtractionContext, buildNoteContentForExtraction } from './insightExtraction'
+import { getSession } from './sessions'
+import { deleteInsight, clearAllInsights } from './insights'
 type Db = any // Drizzle sql.js instance
 
 // ============================================
@@ -585,6 +587,249 @@ export async function distillSession(
 }
 
 /**
+ * Re-run AI insight extraction against the messages of an already-distilled
+ * session. Deletes only unverified insights from that session, then inserts
+ * the new set. Verified and rejected insights are preserved.
+ *
+ * Use this to clean up extraction-quality issues (e.g. interviewer meta-text
+ * leaking into insights) without redoing the interview.
+ */
+export async function reExtractSessionInsights(
+  db: Db,
+  sessionId: string,
+): Promise<{
+  sessionId: string
+  topicTitle: string
+  deleted: number
+  inserted: number
+}> {
+  const { session, topic } = getSession(db, sessionId)
+
+  // Re-extraction mines the DISTILLED NOTE (which is the AI's own synthesis
+  // of the interview) — not the raw transcript. The transcript contains
+  // interviewer scaffolding that the extractor can't always resist pulling
+  // into insights, even with strong prompting. The distilled note is
+  // pre-curated and is a much cleaner input.
+  const { note } = getNoteForSession(db, sessionId)
+
+  const cleanedContent = buildNoteContentForExtraction({
+    contentFullAnalysis: note.contentFullAnalysis,
+    contentBriefSummary: note.contentBriefSummary,
+    contentDecisionFramework: note.contentDecisionFramework,
+  })
+
+  if (cleanedContent.trim().length === 0) {
+    throw new Error('Distilled note is empty — cannot re-extract')
+  }
+
+  // Gather user profile context for richer AI prompts (matches distillSession)
+  const userProfile = db.select().from(users).where(eq(users.id, LOCAL_USER_ID)).get()
+
+  // Verified insights for deduplication — from OTHER sessions
+  // (we're about to delete this session's own unverified insights anyway)
+  const existingVerified = db
+    .select({ content: insights.content, confidenceScore: insights.confidenceScore })
+    .from(insights)
+    .where(
+      and(
+        eq(insights.userId, LOCAL_USER_ID),
+        eq(insights.verificationStatus, 'verified'),
+      ),
+    )
+    .all()
+    .map((i: any) => ({ content: i.content, confidenceScore: i.confidenceScore ?? 50 }))
+
+  const extractionCtx: ExtractionContext = {
+    content: cleanedContent,
+    sourceType: 'note_redistill',
+    topicTitle: topic?.title,
+    topicDescription: topic?.description || undefined,
+    userName: userProfile?.name || undefined,
+    occupation: userProfile?.occupation || undefined,
+    isMiniSession: !!session.isMiniSession,
+    existingVerifiedInsights: existingVerified,
+  }
+
+  // Delete only unverified insights from this session (verified/rejected preserved).
+  // Match via sourceSessionId OR via noteId → notes.sessionId, since older
+  // insights may have a null sourceSessionId even when correctly attached.
+  const noteIdsForSession = db
+    .select({ id: notes.id })
+    .from(notes)
+    .where(eq(notes.sessionId, sessionId))
+    .all()
+    .map((n: any) => n.id)
+  const noteIdSet = new Set(noteIdsForSession)
+
+  const staleCandidates = db
+    .select({
+      id: insights.id,
+      sourceSessionId: insights.sourceSessionId,
+      noteId: insights.noteId,
+    })
+    .from(insights)
+    .where(eq(insights.verificationStatus, 'unverified'))
+    .all()
+
+  const staleInsightIds = staleCandidates
+    .filter((i: any) => i.sourceSessionId === sessionId || (i.noteId && noteIdSet.has(i.noteId)))
+    .map((i: any) => i.id)
+
+  let deleted = 0
+  for (const id of staleInsightIds) {
+    try {
+      deleteInsight(db, id)
+      deleted++
+    } catch (err) {
+      console.warn(`[me.md:notes] Failed to delete stale insight ${id}:`, err)
+    }
+  }
+
+  const extractedInsights = await extractInsights(extractionCtx)
+
+  let inserted = 0
+  for (const insight of extractedInsights) {
+    const insightId = crypto.randomUUID()
+    // Encode source format into extractionMethod so per-format provenance
+    // survives in the DB without a schema migration. e.g. "ai:full_analysis",
+    // "ai:brief_summary", "ai:decision_framework". Fallback insights lose
+    // the suffix since their source format is irrelevant for review.
+    const extractionMethod = insight.sourceFormat
+      ? `${insight.extractionMethod || 'ai'}:${insight.sourceFormat}`
+      : (insight.extractionMethod || 'ai')
+    db.insert(insights)
+      .values({
+        id: insightId,
+        noteId: note.id,
+        topicId: session.topicId,
+        userId: LOCAL_USER_ID,
+        content: insight.content,
+        confidenceScore: insight.confidenceScore,
+        extractionMethod,
+        verificationStatus: 'unverified',
+        sourceSessionId: sessionId,
+      })
+      .run()
+    inserted++
+  }
+
+  scheduleSave()
+
+  return {
+    sessionId,
+    topicTitle: topic?.title || 'Unknown Topic',
+    deleted,
+    inserted,
+  }
+}
+
+/**
+ * Re-run extraction across every session that has a distilled note.
+ *
+ * Sessions without a distilled note are skipped — the extractor needs the
+ * note as input. Per-session errors are collected and the batch continues.
+ *
+ * The `onProgress` callback fires twice per session:
+ * - `'start'` before the per-session work begins, so the UI can announce
+ *   "Extracting from {topic} (3 / 16)…" while the LLM call is in flight.
+ * - `'complete'` after the session's work finishes (success or error).
+ */
+export async function reExtractAllSessions(
+  db: Db,
+  onProgress?: (
+    phase: 'start' | 'complete',
+    index: number,
+    total: number,
+    title: string,
+  ) => void,
+): Promise<{
+  sessionsProcessed: number
+  totalDeleted: number
+  totalInserted: number
+  errors: Array<{ sessionId: string; topicTitle: string; message: string }>
+}> {
+  const allSessions = db
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(eq(sessions.userId, LOCAL_USER_ID))
+    .all()
+
+  // Process every session that has a distilled note. Sessions that already
+  // have only verified insights are still re-mined — the new extraction
+  // produces a fresh batch of unverified candidates for review, while the
+  // verified set is preserved inside reExtractSessionInsights.
+  const allNotes = db
+    .select({ id: notes.id, sessionId: notes.sessionId })
+    .from(notes)
+    .where(eq(notes.userId, LOCAL_USER_ID))
+    .all()
+  const sessionIdsWithNotes = new Set<string>(
+    allNotes.map((n: any) => n.sessionId as string),
+  )
+
+  const candidateIds = allSessions
+    .map((s: any) => s.id as string)
+    .filter((sid: string) => sessionIdsWithNotes.has(sid))
+
+  if (candidateIds.length === 0) {
+    console.warn(
+      `[me.md:notes] reExtractAllSessions: ${allSessions.length} session(s) for user, but ` +
+        `none have a distilled note — nothing to re-extract.`,
+    )
+    onProgress?.('complete', 0, 0, '')
+    return { sessionsProcessed: 0, totalDeleted: 0, totalInserted: 0, errors: [] }
+  }
+
+  let totalDeleted = 0
+  let totalInserted = 0
+  const errors: Array<{ sessionId: string; topicTitle: string; message: string }> = []
+  let sessionsProcessed = 0
+
+  for (let i = 0; i < candidateIds.length; i++) {
+    const sid = candidateIds[i]
+
+    // Pre-look up the topic title so the UI can show "starting X" before
+    // the slow AI extraction call rather than waiting for it to finish.
+    let upcomingTitle = 'Unknown Topic'
+    try {
+      const { topic } = getSession(db, sid)
+      upcomingTitle = topic?.title || 'Unknown Topic'
+    } catch {
+      // session may have been deleted mid-batch; surface as Unknown
+    }
+    onProgress?.('start', i, candidateIds.length, upcomingTitle)
+
+    let currentTitle = upcomingTitle
+    try {
+      const result = await reExtractSessionInsights(db, sid)
+      currentTitle = result.topicTitle
+      totalDeleted += result.deleted
+      totalInserted += result.inserted
+      sessionsProcessed++
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      try {
+        const { topic } = getSession(db, sid)
+        currentTitle = topic?.title || upcomingTitle
+      } catch {
+        currentTitle = upcomingTitle
+      }
+      console.warn(`[me.md:notes] Re-extraction failed for session ${sid}:`, err)
+      errors.push({ sessionId: sid, topicTitle: currentTitle, message })
+    }
+
+    onProgress?.('complete', i + 1, candidateIds.length, currentTitle)
+  }
+
+  return {
+    sessionsProcessed,
+    totalDeleted,
+    totalInserted,
+    errors,
+  }
+}
+
+/**
  * Regenerate note content in a specific format.
  */
 export async function regenerateNote(
@@ -837,4 +1082,110 @@ export function exportNoteMarkdown(db: Db, id: string, format: string = 'full_an
   const safeTitle = title.replace(/[^a-zA-Z0-9-_ ]/g, '').replace(/\s+/g, '_').substring(0, 50)
 
   return { markdownContent, filename: `${safeTitle}.md` }
+}
+
+/**
+ * Destructive full reset: delete ALL insights + notes + concept graph
+ * artifacts for the local user, then re-distill every session from raw
+ * transcript, then re-extract insights using the current prompt (which
+ * produces first-person, dedup-aware output).
+ *
+ * `distillSession` runs insight extraction itself, so a separate
+ * re-extract phase is unnecessary.
+ *
+ * Phase callbacks fire in this order:
+ *   - 'clear' once with index=0 (clearing is a single step)
+ *   - 'distill' once per session as it begins
+ *   - 'distill' completes implicitly when the next session starts
+ *
+ * Per-session errors are captured and the batch continues. The caller
+ * can show a final summary with `errors` populated.
+ */
+export async function clearAndRedistillAll(
+  db: Db,
+  onProgress?: (
+    phase: 'clear' | 'distill',
+    index: number,
+    total: number,
+    title: string,
+  ) => void,
+): Promise<{
+  insightsDeleted: number
+  notesRegenerated: number
+  sessionsProcessed: number
+  totalInserted: number
+  errors: Array<{ sessionId: string; topicTitle: string; message: string }>
+}> {
+  const userId = LOCAL_USER_ID
+  const errors: Array<{ sessionId: string; topicTitle: string; message: string }> = []
+
+  // Phase 1: clear all insights + notes + concept graph for the user.
+  onProgress?.('clear', 0, 0, 'Clearing insights and notes')
+
+  const { deleted: insightsDeleted } = clearAllInsights(db)
+
+  // Delete all notes for the user. Cascade handles linked insights
+  // (already gone) but better-sqlite3 is happy with the explicit delete.
+  db.delete(notes).where(eq(notes.userId, userId)).run()
+
+  // Concept nodes & edges are orphaned now (their insights are gone).
+  // Wipe them all so the knowledge graph starts fresh.
+  db.delete(conceptNodes).where(eq(conceptNodes.userId, userId)).run()
+  // Edges don't have userId — they're per-knowledge-graph and edges
+  // reference concept nodes. After clearing all nodes, edges are
+  // orphaned but harmless. Skip the edge cleanup; the graph view
+  // ignores edges that point to missing nodes.
+
+  // Phase 2: distill every session in turn.
+  const allSessions = db.select({
+    id: sessions.id,
+    topicId: sessions.topicId,
+  }).from(sessions)
+    .where(eq(sessions.userId, userId))
+    .all()
+
+  const total = allSessions.length
+  let notesRegenerated = 0
+  let totalInserted = 0
+
+  for (let i = 0; i < total; i++) {
+    const session = allSessions[i]
+    const topicTitle = db.select({ title: topics.title })
+      .from(topics)
+      .where(eq(topics.id, session.topicId))
+      .get()?.title || 'Untitled'
+
+    onProgress?.('distill', i, total, topicTitle)
+
+    try {
+      // distillSession creates the note (since we cleared all notes above)
+      // and runs initial insight extraction against the new note.
+      await distillSession(db, session.id)
+      notesRegenerated += 1
+
+      // Count insights inserted for this session by querying what was just added.
+      const sessionInsights = db.select({ id: insights.id })
+        .from(insights)
+        .where(eq(insights.sourceSessionId, session.id))
+        .all()
+      totalInserted += sessionInsights.length
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      errors.push({ sessionId: session.id, topicTitle, message })
+      console.error(
+        `[me.md:clear-redistill] Failed to distill session ${session.id} (${topicTitle}):`,
+        message,
+      )
+    }
+  }
+
+  scheduleSave()
+
+  return {
+    insightsDeleted,
+    notesRegenerated,
+    sessionsProcessed: total - errors.length,
+    totalInserted,
+    errors,
+  }
 }

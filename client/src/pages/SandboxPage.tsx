@@ -23,7 +23,8 @@ interface ComparisonResult {
 
 interface ContextStatus {
   hasContext: boolean;
-  totalCategorizedInsights: number;
+  totalVerifiedInsights: number;
+  insightsInContext: number;
   aiAvailable: boolean;
   categories: {
     communicationStyle: number;
@@ -191,8 +192,18 @@ export default function SandboxPage() {
           {contextStatus.hasContext ? (
             <span>
               <span className="font-medium">Context active:</span>{' '}
-              {contextStatus.totalCategorizedInsights} verified insight{contextStatus.totalCategorizedInsights !== 1 ? 's' : ''} found across{' '}
-              {contextStatus.categories ? Object.values(contextStatus.categories).filter(v => v > 0).length : 0} categories.
+              {contextStatus.totalVerifiedInsights} verified insight{contextStatus.totalVerifiedInsights !== 1 ? 's' : ''} found
+              {contextStatus.insightsInContext < contextStatus.totalVerifiedInsights ? (
+                <span>
+                  {' '}(using {contextStatus.insightsInContext} in personalization across{' '}
+                  {contextStatus.categories ? Object.values(contextStatus.categories).filter(v => v > 0).length : 0} categories)
+                </span>
+              ) : (
+                <span>
+                  {' '}across{' '}
+                  {contextStatus.categories ? Object.values(contextStatus.categories).filter(v => v > 0).length : 0} categories
+                </span>
+              )}.
               {contextStatus.aiAvailable
                 ? ' AI-powered comparison is enabled.'
                 : ' Responses use template-based comparison (no API key configured).'}

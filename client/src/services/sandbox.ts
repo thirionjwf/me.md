@@ -345,8 +345,14 @@ export function compareSandboxStream(db: Db, prompt: string): {
  * Check if user has enough context for personalized responses.
  */
 export function getContextStatus(db: Db) {
+  // True count of verified insights in the DB (uncapped).
+  const verifiedCountRow = db.select({ id: insights.id })
+    .from(insights)
+    .where(and(eq(insights.userId, LOCAL_USER_ID), eq(insights.verificationStatus, 'verified')))
+    .all()
+
   const context = getProfileContext(db)
-  const totalInsights = context ? (
+  const totalInsightsInContext = context ? (
     context.communicationStyle.length +
     context.toneOfVoice.length +
     context.personalTraits.length +
@@ -355,8 +361,9 @@ export function getContextStatus(db: Db) {
   ) : 0
 
   return {
-    hasContext: totalInsights > 0,
-    totalCategorizedInsights: totalInsights,
+    hasContext: verifiedCountRow.length > 0,
+    totalVerifiedInsights: verifiedCountRow.length,
+    insightsInContext: totalInsightsInContext,
     aiAvailable: isApiKeyConfigured(),
     categories: context ? {
       communicationStyle: context.communicationStyle.length,

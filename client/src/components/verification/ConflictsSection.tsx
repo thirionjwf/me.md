@@ -159,7 +159,12 @@ export default function ConflictsSection() {
     setError(null);
 
     try {
-      resolveConflict(db, resolutionState.conflictId, resolutionState.note.trim() || '');
+      resolveConflict(
+        db,
+        resolutionState.conflictId,
+        resolutionState.resolution,
+        resolutionState.note.trim() || undefined,
+      );
       setSuccessMsg('Conflict resolved successfully');
       setResolutionState(null);
 
